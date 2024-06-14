@@ -58,4 +58,8 @@ if(CONFIG_AMBIQ_HAL_USE_WDT)
     zephyr_library_sources(hal/am_hal_wdt.c)
 endif()
 
+if(CONFIG_LOG_BACKEND_SWO)
+  zephyr_library_sources(hal/mcu/am_hal_tpiu.c)
+endif()
+
 zephyr_include_directories(hal)
