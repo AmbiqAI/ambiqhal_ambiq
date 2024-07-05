@@ -146,6 +146,45 @@ typedef struct
 
 typedef struct
 {
+    uint32_t                    ui32CFGAddr;
+    uint32_t                    ui32CFGVal;
+    uint32_t                    ui32FLASHAddr;
+    uint32_t                    ui32FLASHVal;
+} am_hal_mspi_cq_sc_cfg_entry_t;
+
+typedef struct
+{
+    uint32_t                    ui32INSTRAddr;
+    uint32_t                    ui32INSTRVal;
+    uint32_t                    ui32DMATARGADDRAddr;
+    uint32_t                    ui32DMATARGADDRVal;
+    uint32_t                    ui32DMADEVADDRAddr;
+    uint32_t                    ui32DMADEVADDRVal;
+    uint32_t                    ui32DMATOTCOUNTAddr;
+    uint32_t                    ui32DMATOTCOUNTVal;
+    uint32_t                    ui32DMACFG1Addr;
+    uint32_t                    ui32DMACFG1Val;
+    // Need to insert couple of Dummy's
+    uint32_t                    ui32DummyAddr1;
+    uint32_t                    ui32DummyVal1;
+    uint32_t                    ui32DummyAddr2;
+    uint32_t                    ui32DummyVal2;
+    // Need to disable the DMA to prepare for next reconfig
+    // Need to have this following the DMAEN for CMDQ
+    uint32_t                    ui32DMACFG2Addr;
+    uint32_t                    ui32DMACFG2Val;
+} am_hal_mspi_cq_sc_xfer_entry_t;
+
+typedef struct
+{
+    uint32_t                    ui32PAUSENAddr;
+    uint32_t                    ui32PAUSEENVal;
+    uint32_t                    ui32SETCLRAddr;
+    uint32_t                    ui32SETCLRVal;
+} am_hal_mspi_cq_sc_pause_entry_t;
+
+typedef struct
+{
     bool        bValid;
     uint32_t    regCFG;
     uint32_t    regMSPICFG;
@@ -237,6 +276,7 @@ typedef struct
     am_hal_mspi_CQ_t              CQ;
     // To support sequence
     am_hal_mspi_seq_e             eSeq;
+    am_hal_mspi_seq_device_cfg_t  seqDeviceCfg;
     bool                          bAutonomous;
     uint32_t                      ui32NumTransactions;
     volatile bool                 bRestart;
@@ -1112,6 +1152,245 @@ static void mspi_seq_loopback(void *pCallbackCtxt, uint32_t status)
     MSPIn(pMSPIState->ui32Module)->CQSETCLEAR = AM_HAL_MSPI_SC_UNPAUSE_SEQLOOP;
 }
 
+static void build_scatter_cfg(am_hal_mspi_state_t *pMSPIState,
+                              am_hal_mspi_cq_sc_cfg_entry_t *pCfgEntry)
+{
+    am_hal_mspi_seq_device_cfg_t *pSeqDeviceCfg = &pMSPIState->seqDeviceCfg;
+    uint32_t ui32Module = pMSPIState->ui32Module;
+    uint32_t ui32CFGVal = MSPIn(ui32Module)->CFG;
+    uint32_t ui32FLASHVal = MSPIn(ui32Module)->FLASH;
+
+    pCfgEntry->ui32CFGAddr = (uint32_t)&MSPIn(ui32Module)->CFG;
+    //
+    // Set the instruction length
+    //
+    if ( pSeqDeviceCfg->ui8InstrLen != 0 )
+    {
+        ui32CFGVal &= (~MSPI0_CFG_ISIZE_Msk);
+        ui32CFGVal |= _VAL2FLD(MSPI0_CFG_ISIZE, pSeqDeviceCfg->ui8InstrLen - 1);
+
+        ui32FLASHVal |= _VAL2FLD(MSPI0_FLASH_XIPSENDI, 1);
+    }
+
+    //
+    // Set address length if needed
+    //
+    if ( pSeqDeviceCfg->ui8AddrLen != 0 )
+    {
+        ui32CFGVal &= (~MSPI0_CFG_ASIZE_Msk);
+        ui32CFGVal |= _VAL2FLD(MSPI0_CFG_ASIZE, pSeqDeviceCfg->ui8AddrLen - 1);
+
+        ui32FLASHVal |= _VAL2FLD(MSPI0_FLASH_XIPSENDA, 1);
+    }
+
+    //
+    // Set the turn-around if needed.
+    //
+    if ( pSeqDeviceCfg->ui8Turnaround != 0 )
+    {
+        ui32CFGVal &= (~MSPI0_CFG_TURNAROUND_Msk);
+        ui32CFGVal |= _VAL2FLD(MSPI0_CFG_TURNAROUND, pSeqDeviceCfg->ui8Turnaround);
+
+        ui32FLASHVal |= _VAL2FLD(MSPI0_FLASH_XIPENTURN, 1);
+    }
+
+    //
+    // Set the write latency counter enable if needed.
+    //
+    if ( pSeqDeviceCfg->ui8WriteLatency != 0 )
+    {
+        ui32CFGVal &= (~MSPI0_CFG_WRITELATENCY_Msk);
+        ui32CFGVal|= _VAL2FLD(MSPI0_CFG_WRITELATENCY, pSeqDeviceCfg->ui8WriteLatency);
+
+        ui32FLASHVal |= _VAL2FLD(MSPI0_FLASH_XIPENWLAT, 1);
+    }
+
+    pCfgEntry->ui32CFGVal = ui32CFGVal;
+
+    pCfgEntry->ui32FLASHAddr = (uint32_t)&MSPIn(ui32Module)->FLASH;
+
+    pCfgEntry->ui32FLASHVal  = ui32FLASHVal;
+}
+
+static uint32_t build_scatter_xfer(am_hal_mspi_state_t *pMSPIState,
+                                   uint8_t ui8Priority,
+                                   am_hal_mspi_cq_scatter_xfer_t *pXfer,
+                                   am_hal_mspi_cq_sc_xfer_entry_t *pXferEntry)
+{
+    uint32_t ui32Module = pMSPIState->ui32Module;
+    uint32_t ui32INSTRVal = MSPIn(ui32Module)->XIPINSTR;
+
+    //
+    // Perform some sanity checks on the transaction.
+    //
+    if (pXfer->ui32TransferCount > AM_HAL_MSPI_MAX_TRANS_SIZE)
+    {
+        return AM_HAL_STATUS_OUT_OF_RANGE;
+    }
+
+    if ( (pXfer->ui32SRAMAddress >= AM_HAL_FLASH_DTCM_START) &&
+         (pXfer->ui32SRAMAddress <= AM_HAL_FLASH_DTCM_END) )
+    {
+        // DMA to and from DTCM is not allowed
+        return AM_HAL_STATUS_INVALID_ARG;
+    }
+
+    //
+    // Command to set the XIPINSTR
+    //
+    pXferEntry->ui32INSTRAddr = (uint32_t)&MSPIn(ui32Module)->XIPINSTR;
+
+    if (pXfer->eDirection == AM_HAL_MSPI_RX)
+    {
+        ui32INSTRVal &= (~MSPI0_XIPINSTR_READINSTR_Msk);
+        ui32INSTRVal |= _VAL2FLD(MSPI0_XIPINSTR_READINSTR, pXfer->ui16DeviceInstr);
+    }
+    else if (pXfer->eDirection == AM_HAL_MSPI_TX)
+    {
+        ui32INSTRVal &= (~MSPI0_XIPINSTR_WRITEINSTR_Msk);
+        ui32INSTRVal |= _VAL2FLD(MSPI0_XIPINSTR_WRITEINSTR, pXfer->ui16DeviceInstr);
+    }
+    pXferEntry->ui32INSTRVal = ui32INSTRVal;
+
+    //
+    // Command to set the DMATARGADDR
+    //
+    pXferEntry->ui32DMATARGADDRAddr = (uint32_t)&MSPIn(ui32Module)->DMATARGADDR;
+    pXferEntry->ui32DMATARGADDRVal  = pXfer->ui32SRAMAddress;
+
+    //
+    // Command to set the DMADEVADDR
+    //
+    pXferEntry->ui32DMADEVADDRAddr  = (uint32_t)&MSPIn(ui32Module)->DMADEVADDR;
+    pXferEntry->ui32DMADEVADDRVal   = pXfer->ui32DeviceAddress;
+
+    //
+    // Command to set the DMATOTALCOUNT
+    //
+    pXferEntry->ui32DMATOTCOUNTAddr = (uint32_t)&MSPIn(ui32Module)->DMATOTCOUNT;
+    pXferEntry->ui32DMATOTCOUNTVal  = pXfer->ui32TransferCount;
+
+    //
+    // Command to set the DMACFG to start DMA.
+    //
+    pXferEntry->ui32DMACFG1Addr     = (uint32_t)&MSPIn(ui32Module)->DMACFG;
+    pXferEntry->ui32DMACFG1Val      =
+        _VAL2FLD(MSPI0_DMACFG_DMAPWROFF, 0)   |  // DMA Auto Power-off not supported!
+        _VAL2FLD(MSPI0_DMACFG_DMAPRI, ui8Priority)    |
+        _VAL2FLD(MSPI0_DMACFG_DMADIR, pXfer->eDirection)     |
+        _VAL2FLD(MSPI0_DMACFG_DMAEN, 3);
+    pXferEntry->ui32DummyAddr1 = (uint32_t)&MSPIn(ui32Module)->CQSETCLEAR;
+    pXferEntry->ui32DummyVal1 = 0;
+    pXferEntry->ui32DummyAddr2 = (uint32_t)&MSPIn(ui32Module)->CQSETCLEAR;
+    pXferEntry->ui32DummyVal2 = 0;
+
+    //
+    // Command to set the DMACFG to disable DMA.
+    // Need to make sure we disable DMA before we can reprogram
+    //
+    pXferEntry->ui32DMACFG2Addr     = (uint32_t)&MSPIn(ui32Module)->DMACFG;
+    pXferEntry->ui32DMACFG2Val      = _VAL2FLD(MSPI0_DMACFG_DMAEN, 0);
+
+    return AM_HAL_STATUS_SUCCESS;
+}
+
+static void build_scatter_pause(am_hal_mspi_state_t *pMSPIState,
+                                am_hal_mspi_cq_scatter_xfer_t *pXfer,
+                                am_hal_mspi_cq_sc_pause_entry_t *pPauseEntry)
+{
+    uint32_t ui32Module = pMSPIState->ui32Module;
+
+    pPauseEntry->ui32PAUSENAddr = (uint32_t)&MSPIn(ui32Module)->CQPAUSE;
+    pPauseEntry->ui32PAUSEENVal = AM_HAL_MSPI_PAUSE_DEFAULT;
+    pPauseEntry->ui32SETCLRAddr = (uint32_t)&MSPIn(ui32Module)->CQSETCLEAR;
+    pPauseEntry->ui32SETCLRVal = pXfer->ui32StatusSetClr;
+}
+
+static uint32_t mspi_post_cq_xfer(am_hal_mspi_state_t *pMSPIState,
+                                  uint32_t index,
+                                  am_hal_mspi_callback_t pfnCallback,
+                                  void *pCallbackCtxt)
+{
+    am_hal_mspi_callback_t pfnCallback1;
+    uint32_t               ui32Critical = 0;
+    uint32_t               ui32NumPend;
+    uint32_t               ui32Status;
+
+    pfnCallback1 = pfnCallback;
+    if ( !pfnCallback1 && !pMSPIState->block && (pMSPIState->eSeq == AM_HAL_MSPI_SEQ_NONE) &&
+            (pMSPIState->ui32NumUnSolicited >= (pMSPIState->ui32MaxPending / 2)) )
+    {
+        // Need to schedule a dummy callback, to ensure ui32NumCQEntries get updated in ISR
+        pfnCallback1 = mspi_dummy_callback;
+    }
+    //
+    // Store the callback function pointer.
+    //
+    pMSPIState->pfnCallback[index & (AM_HAL_MSPI_MAX_CQ_ENTRIES - 1)] = pfnCallback1;
+    pMSPIState->pCallbackCtxt[index & (AM_HAL_MSPI_MAX_CQ_ENTRIES - 1)] = pCallbackCtxt;
+
+    //
+    // Need to protect access of ui32NumPendTransactions as it is accessed
+    // from ISR as well
+    //
+    // Start a critical section.
+    //
+    ui32Critical = am_hal_interrupt_master_disable();
+
+    //
+    // Post the transaction to the CQ.
+    // Register for interrupt only if there is a callback
+    //
+    ui32Status = am_hal_cmdq_post_block(pMSPIState->CQ.pCmdQHdl, pfnCallback1);
+    if (AM_HAL_STATUS_SUCCESS != ui32Status)
+    {
+        //
+        // End the critical section.
+        //
+        am_hal_interrupt_master_set(ui32Critical);
+
+        am_hal_cmdq_release_block(pMSPIState->CQ.pCmdQHdl);
+    }
+    else
+    {
+        ui32NumPend = pMSPIState->ui32NumCQEntries++;
+        pMSPIState->ui32NumTransactions++;
+        if (pfnCallback)
+        {
+            pMSPIState->bAutonomous = false;
+            pMSPIState->ui32NumUnSolicited = 0;
+        }
+        else
+        {
+            if (pfnCallback1)
+            {
+                // This implies we have already scheduled a dummy callback
+                pMSPIState->ui32NumUnSolicited = 0;
+            }
+            else
+            {
+                pMSPIState->ui32NumUnSolicited++;
+            }
+        }
+        //
+        // End the critical section.
+        //
+        am_hal_interrupt_master_set(ui32Critical);
+        if (ui32NumPend == 0)
+        {
+            //
+            // Enable the Command Queue
+            //
+            ui32Status = mspi_cq_enable(pMSPIState);
+            if (AM_HAL_STATUS_SUCCESS != ui32Status)
+            {
+                return ui32Status;
+            }
+        }
+    }
+    return ui32Status;
+}
+
 //*****************************************************************************
 //
 // External Functions.
@@ -1597,6 +1876,13 @@ am_hal_mspi_enable(void *pHandle)
         pMSPIState->ui32NumTransactions = 0;
         pMSPIState->bAutonomous = true;
         pMSPIState->ui32NumUnSolicited = 0;
+
+        pMSPIState->seqDeviceCfg.eSeqMode = AM_HAL_MSPI_SEQ_RESET_MODE;
+        pMSPIState->seqDeviceCfg.ui16TotalPackets = 0;
+        pMSPIState->seqDeviceCfg.ui8WriteLatency = MSPIn(pMSPIState->ui32Module)->CFG_b.WRITELATENCY;
+        pMSPIState->seqDeviceCfg.ui8Turnaround = MSPIn(pMSPIState->ui32Module)->CFG_b.TURNAROUND;
+        pMSPIState->seqDeviceCfg.ui8AddrLen = MSPIn(pMSPIState->ui32Module)->CFG_b.ASIZE + 1;
+        pMSPIState->seqDeviceCfg.ui8InstrLen = MSPIn(pMSPIState->ui32Module)->CFG_b.ISIZE + 1;
     }
 
     pMSPIState->prefix.s.bEnable = true;
@@ -1730,6 +2016,22 @@ uint32_t am_hal_mspi_control(void *pHandle,
             // Enable scrambling.
             //
             MSPIn(ui32Module)->SCRAMBLING_b.SCRENABLE = 1;
+            break;
+
+        case AM_HAL_MSPI_REQ_SCRAMB_CONFIG:
+#ifndef AM_HAL_DISABLE_API_VALIDATION
+            if (!pConfig)
+            {
+                return AM_HAL_STATUS_INVALID_ARG;
+            }
+#endif // AM_HAL_DISABLE_API_VALIDATION
+            am_hal_mspi_scramble_config_t *pScrambleCfg = (am_hal_mspi_scramble_config_t *)pConfig;
+
+            MSPIn(ui32Module)->SCRAMBLING =
+                _VAL2FLD(MSPI0_SCRAMBLING_SCRSTART, pScrambleCfg->scramblingStartAddr >> 16) |
+                _VAL2FLD(MSPI0_SCRAMBLING_SCREND, pScrambleCfg->scramblingEndAddr >> 16) |
+                _VAL2FLD(MSPI0_SCRAMBLING_SCRENABLE, pScrambleCfg->bEnable);
+
             break;
 
         case AM_HAL_MSPI_REQ_XIPACK:
@@ -1897,7 +2199,15 @@ uint32_t am_hal_mspi_control(void *pHandle,
                 return AM_HAL_STATUS_INVALID_OPERATION;
             }
 #endif // AM_HAL_DISABLE_API_VALIDATION
+#if defined(CONFIG_MSPI)
+            am_hal_mspi_seq_device_cfg_t *pSeqDeviceCfg = (am_hal_mspi_seq_device_cfg_t *)pConfig;
+            eSeq = pSeqDeviceCfg->eSeqMode != AM_HAL_MSPI_SEQ_RESET_MODE ?
+                                              AM_HAL_MSPI_SEQ_UNDER_CONSTRUCTION :
+                                              AM_HAL_MSPI_SEQ_NONE;
+            pMSPIState->seqDeviceCfg = *pSeqDeviceCfg;
+#else
             eSeq = *((bool *)pConfig) ? AM_HAL_MSPI_SEQ_UNDER_CONSTRUCTION: AM_HAL_MSPI_SEQ_NONE;
+#endif
             if (eSeq == pMSPIState->eSeq)
             {
                 // Nothing to do
@@ -1929,7 +2239,12 @@ uint32_t am_hal_mspi_control(void *pHandle,
                 default:
                 ;
             }
+#if defined(CONFIG_MSPI)
+            if (ui32Status == AM_HAL_STATUS_SUCCESS &&
+                pSeqDeviceCfg->eSeqMode == AM_HAL_MSPI_SEQ_RESET_MODE)
+#else
             if (ui32Status == AM_HAL_STATUS_SUCCESS)
+#endif
             {
                 // Reset the cmdq
                 am_hal_cmdq_reset(pMSPIState->CQ.pCmdQHdl);
@@ -2481,11 +2796,6 @@ uint32_t am_hal_mspi_blocking_transfer(void *pHandle,
     ui32Control |= _VAL2FLD(MSPI0_CTRL_CONT, pTransaction->bContinue);
 
     //
-    // Set the write latency counter enable if needed.
-    //
-    ui32Control |= _VAL2FLD(MSPI0_CTRL_ENWLAT, pTransaction->bEnWRLatency);
-
-    //
     // Set the Quad Command if this is transmit and the device is configured
     // for Dual Quad mode.
     //
@@ -2705,6 +3015,184 @@ uint32_t am_hal_mspi_nonblocking_transfer(void *pHandle,
     //
     // Return the status.
     //
+    return ui32Status;
+}
+
+//
+// MSPI scatter IO transfer function using command queue
+//
+uint32_t am_hal_mspi_cq_scatter_xfer(void *pHandle,
+                                     am_hal_mspi_cq_scatter_xfer_t *pXfer,
+                                     am_hal_mspi_callback_t pfnCallback,
+                                     void *pCallbackCtxt)
+{
+    am_hal_mspi_state_t          *pMSPIState = (am_hal_mspi_state_t *)pHandle;
+    uint32_t                      ui32Status = AM_HAL_STATUS_SUCCESS;
+    uint32_t                      ui32Module = pMSPIState->ui32Module;
+    uint32_t                      ui32NumEntry;
+    am_hal_cmdq_entry_t          *pCQBlock;
+    uint32_t                      index;
+
+#ifndef AM_HAL_DISABLE_API_VALIDATION
+    //
+    // Check the handle.
+    //
+    if (!AM_HAL_MSPI_CHK_HANDLE(pHandle))
+    {
+        return AM_HAL_STATUS_INVALID_HANDLE;
+    }
+    if (!pMSPIState->pTCB)
+    {
+        return AM_HAL_STATUS_INVALID_OPERATION;
+    }
+    //
+    // Check that the interface is enabled.
+    //
+    if (!pMSPIState->prefix.s.bEnable)
+    {
+        return AM_HAL_STATUS_INVALID_OPERATION;
+    }
+#endif
+
+    if (pMSPIState->eSeq == AM_HAL_MSPI_SEQ_RUNNING)
+    {
+        // Dynamic additions to sequence not allowed
+        return AM_HAL_STATUS_INVALID_OPERATION;
+    }
+
+    if (pMSPIState->block && (pXfer->ui32PauseCondition != 0))
+    {
+        // Paused operations not allowed in block mode
+        return AM_HAL_STATUS_INVALID_OPERATION;
+    }
+
+    if (!pMSPIState->seqDeviceCfg.ui16TotalPackets)
+    {
+        return AM_HAL_STATUS_INVALID_OPERATION;
+    }
+
+    if (pMSPIState->seqDeviceCfg.ui16TotalPackets == 1)
+    {
+        pMSPIState->seqDeviceCfg.eSeqMode = AM_HAL_MSPI_SEQ_NORM_MODE;
+    }
+
+    if(pXfer->ui16PacketIndex == 0)
+    {
+        switch(pMSPIState->seqDeviceCfg.eSeqMode)
+        {
+            case AM_HAL_MSPI_SEQ_NORM_MODE:
+                ui32NumEntry = (sizeof(am_hal_mspi_cq_sc_cfg_entry_t) +
+                                sizeof(am_hal_mspi_cq_sc_xfer_entry_t) +
+                                sizeof(am_hal_mspi_cq_sc_pause_entry_t)) /
+                                sizeof(am_hal_cmdq_entry_t) + 1;
+                break;
+            case AM_HAL_MSPI_SEQ_STREAM_MODE:
+                ui32NumEntry = (sizeof(am_hal_mspi_cq_sc_cfg_entry_t) +
+                                sizeof(am_hal_mspi_cq_sc_xfer_entry_t)) /
+                                sizeof(am_hal_cmdq_entry_t) + 1;
+                break;
+            case AM_HAL_MSPI_SEQ_LOOP_MODE:
+            default:
+                //Not supported currently
+                return AM_HAL_STATUS_INVALID_ARG;
+                break;
+        }
+
+        //
+        // Check to see if there is enough room in the CQ
+        //
+        if ((pMSPIState->ui32NumCQEntries == AM_HAL_MSPI_MAX_CQ_ENTRIES) ||
+            (am_hal_cmdq_alloc_block(pMSPIState->CQ.pCmdQHdl, ui32NumEntry, &pCQBlock, &index)))
+        {
+            return AM_HAL_STATUS_OUT_OF_RANGE;
+        }
+
+        pCQBlock->address = (uint32_t)&MSPIn(ui32Module)->CQPAUSE;
+        pCQBlock->value = get_pause_val(pMSPIState, pXfer->ui32PauseCondition);
+        pCQBlock++;
+
+        build_scatter_cfg(pMSPIState, (am_hal_mspi_cq_sc_cfg_entry_t *)pCQBlock);
+        pCQBlock += sizeof(am_hal_mspi_cq_sc_cfg_entry_t) / sizeof(am_hal_cmdq_entry_t);
+    }
+
+    switch(pMSPIState->seqDeviceCfg.eSeqMode)
+    {
+        case AM_HAL_MSPI_SEQ_NORM_MODE:
+            if(pXfer->ui16PacketIndex > 0)
+            {
+                //
+                // Check to see if there is enough room in the CQ
+                //
+                ui32NumEntry = (sizeof(am_hal_mspi_cq_sc_xfer_entry_t) +
+                                sizeof(am_hal_mspi_cq_sc_pause_entry_t)) /
+                                sizeof(am_hal_cmdq_entry_t);
+                if ((pMSPIState->ui32NumCQEntries == AM_HAL_MSPI_MAX_CQ_ENTRIES) ||
+                    (am_hal_cmdq_alloc_block(pMSPIState->CQ.pCmdQHdl, ui32NumEntry, &pCQBlock, &index)))
+                {
+                    ui32Status = AM_HAL_STATUS_OUT_OF_RANGE;
+                    break;
+                }
+            }
+
+            ui32Status = build_scatter_xfer(pMSPIState, pXfer->ui8Priority, pXfer,
+                                            (am_hal_mspi_cq_sc_xfer_entry_t *)pCQBlock);
+            if (ui32Status != AM_HAL_STATUS_SUCCESS)
+            {
+                am_hal_cmdq_release_block(pMSPIState->CQ.pCmdQHdl);
+                return ui32Status;
+            }
+
+            pCQBlock += sizeof(am_hal_mspi_cq_sc_xfer_entry_t) / sizeof(am_hal_cmdq_entry_t);
+            build_scatter_pause(pMSPIState, pXfer, (am_hal_mspi_cq_sc_pause_entry_t *)pCQBlock);
+
+            ui32Status = mspi_post_cq_xfer(pMSPIState, index, pfnCallback, pCallbackCtxt);
+
+            break;
+
+        case AM_HAL_MSPI_SEQ_STREAM_MODE:
+            if (pXfer->ui16PacketIndex > 0)
+            {
+                //
+                // Check to see if there is enough room in the CQ
+                //
+                ui32NumEntry = sizeof(am_hal_mspi_cq_sc_xfer_entry_t) /
+                               sizeof(am_hal_cmdq_entry_t);
+                if (pXfer->ui16PacketIndex == pMSPIState->seqDeviceCfg.ui16TotalPackets - 1)
+                {
+                    ui32NumEntry += sizeof(am_hal_mspi_cq_sc_pause_entry_t) /
+                                    sizeof(am_hal_cmdq_entry_t);
+                }
+
+                if ((pMSPIState->ui32NumCQEntries == AM_HAL_MSPI_MAX_CQ_ENTRIES) ||
+                    (am_hal_cmdq_alloc_block(pMSPIState->CQ.pCmdQHdl, ui32NumEntry, &pCQBlock, &index)))
+                {
+                    ui32Status = AM_HAL_STATUS_OUT_OF_RANGE;
+                    break;
+                }
+            }
+
+            ui32Status = build_scatter_xfer(pMSPIState, pXfer->ui8Priority, pXfer,
+                                            (am_hal_mspi_cq_sc_xfer_entry_t *)pCQBlock);
+            if (ui32Status != AM_HAL_STATUS_SUCCESS)
+            {
+                am_hal_cmdq_release_block(pMSPIState->CQ.pCmdQHdl);
+                return ui32Status;
+            }
+
+            if (pXfer->ui16PacketIndex == pMSPIState->seqDeviceCfg.ui16TotalPackets - 1)
+            {
+                pCQBlock += sizeof(am_hal_mspi_cq_sc_xfer_entry_t) / sizeof(am_hal_cmdq_entry_t);
+                build_scatter_pause(pMSPIState, pXfer, (am_hal_mspi_cq_sc_pause_entry_t *)pCQBlock);
+            }
+
+            ui32Status = mspi_post_cq_xfer(pMSPIState, index, pfnCallback, pCallbackCtxt);
+
+            break;
+        default:
+            break;
+        //case AM_HAL_MSPI_SEQ_LOOP_MODE Not supported currently
+    }
+
     return ui32Status;
 }
 

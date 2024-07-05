@@ -191,6 +191,14 @@ extern "C"
     AM_HAL_MSPI_TRANS_DMA
   } am_hal_mspi_trans_e;
 
+  typedef enum
+  {
+    AM_HAL_MSPI_SEQ_RESET_MODE,
+    AM_HAL_MSPI_SEQ_NORM_MODE,     // one or multiple xfer with pause
+    AM_HAL_MSPI_SEQ_STREAM_MODE,   // multiple xfer with no pause
+    AM_HAL_MSPI_SEQ_LOOP_MODE,     // Looped xfer
+  } am_hal_mspi_seq_mode_e;
+
   //
   //! MSPI interface mode and chip enable selection
   //
@@ -320,6 +328,8 @@ extern "C"
     AM_HAL_MSPI_REQ_SCRAMB_DIS,
     //! pConfig N/A
     AM_HAL_MSPI_REQ_SCRAMB_EN,
+    //! Pass am_hal_mspi_scramble_config_t * as pConfig
+    AM_HAL_MSPI_REQ_SCRAMB_CONFIG,
     //! Pass uint32_t * as pConfig
     AM_HAL_MSPI_REQ_XIPACK,
     //! pConfig N/A
@@ -558,6 +568,67 @@ extern "C"
   } am_hal_mspi_dma_transfer_t;
 
 
+  typedef struct
+  {
+    uint8_t                     ui8InstrLen;
+
+    uint8_t                     ui8AddrLen;
+
+    uint8_t                     ui8Turnaround;
+
+    uint8_t                     ui8WriteLatency;
+
+    uint16_t                    ui16TotalPackets;
+
+    am_hal_mspi_seq_mode_e      eSeqMode;
+
+  } am_hal_mspi_seq_device_cfg_t;
+
+  //
+  //! CQ scatter transfer structure
+  //
+  typedef struct
+  {
+
+    //! Direction RX: 0 = Peripheral to Memory; TX: 1 = Memory to Peripheral
+    am_hal_mspi_dir_e           eDirection;
+
+    uint16_t                    ui16DeviceInstr;
+
+    //! External Flash Device Address
+    uint32_t                    ui32DeviceAddress;
+
+    //! Internal SRAM Buffer Address
+    uint32_t                    ui32SRAMAddress;
+
+    //! Transfer Count
+    uint32_t                    ui32TransferCount;
+
+    //! Priority 0 = Low (best effort); 1 = High (service immediately)
+    uint8_t                     ui8Priority;
+
+    //! Command Queue Transaction Gating
+    uint32_t                    ui32PauseCondition;
+    //! Command Queue Post-Transaction status setting
+    uint32_t                    ui32StatusSetClr;
+
+    uint16_t                    ui16PacketIndex;
+
+  } am_hal_mspi_cq_scatter_xfer_t;
+
+  typedef struct
+  {
+    //! Scrambling Start Address
+    uint32_t                    scramblingStartAddr;
+
+    //! Scrambling End Address
+    uint32_t                    scramblingEndAddr;
+
+    //! Enable Scrambling or not
+    bool                        bEnable;
+
+  } am_hal_mspi_scramble_config_t;
+
   //
   //! MSPI status structure.
   //
@@ -726,6 +797,27 @@ extern "C"
                                                    am_hal_mspi_trans_e eMode,
                                                    am_hal_mspi_callback_t pfnCallback,
                                                    void *pCallbackCtxt);
+
+    //*****************************************************************************
+  //
+  //! @brief MSPI Scatter IO transfer function using CQ
+  //!
+  //! @param pHandle       - Handle for the interface.
+  //! @param pTransfer     - Pointer to the transaction control structure.
+  //! @param pfnCallback   - Pointer the callback function to be executed when
+  //!                        transaction is complete.
+  //! @param pCallbackCtxt - Passed to callback function
+  //!
+  //! This function performs a transaction on the MSPI using
+  //! Command Queue with DMA.  It handles half duplex transactions.
+  //!
+  //! @return status      - Generic or interface specific status.
+  //
+  //*****************************************************************************
+  extern uint32_t am_hal_mspi_cq_scatter_xfer(void *pHandle,
+                                              am_hal_mspi_cq_scatter_xfer_t *pTransfer,
+                                              am_hal_mspi_callback_t pfnCallback,
+                                              void *pCallbackCtxt);
 
   //*****************************************************************************
   //
