@@ -607,11 +607,6 @@ extern "C"
     //! Priority 0 = Low (best effort); 1 = High (service immediately)
     uint8_t                     ui8Priority;
 
-    //! Command Queue Transaction Gating
-    uint32_t                    ui32PauseCondition;
-    //! Command Queue Post-Transaction status setting
-    uint32_t                    ui32StatusSetClr;
-
     uint16_t                    ui16PacketIndex;
 
   } am_hal_mspi_cq_scatter_xfer_t;

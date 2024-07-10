@@ -177,10 +177,12 @@ typedef struct
 
 typedef struct
 {
-    uint32_t                    ui32PAUSENAddr;
-    uint32_t                    ui32PAUSEENVal;
+    uint32_t                    ui32PAUSENAddr1;
+    uint32_t                    ui32PAUSEENVal1;
     uint32_t                    ui32SETCLRAddr;
     uint32_t                    ui32SETCLRVal;
+    uint32_t                    ui32PAUSENAddr2;
+    uint32_t                    ui32PAUSEENVal2;
 } am_hal_mspi_cq_sc_pause_entry_t;
 
 typedef struct
@@ -1295,15 +1297,18 @@ static uint32_t build_scatter_xfer(am_hal_mspi_state_t *pMSPIState,
 }
 
 static void build_scatter_pause(am_hal_mspi_state_t *pMSPIState,
-                                am_hal_mspi_cq_scatter_xfer_t *pXfer,
+                                uint32_t ui32PauseCondition,
+                                uint32_t ui32StatusSetClr,
                                 am_hal_mspi_cq_sc_pause_entry_t *pPauseEntry)
 {
     uint32_t ui32Module = pMSPIState->ui32Module;
 
-    pPauseEntry->ui32PAUSENAddr = (uint32_t)&MSPIn(ui32Module)->CQPAUSE;
-    pPauseEntry->ui32PAUSEENVal = AM_HAL_MSPI_PAUSE_DEFAULT;
+    pPauseEntry->ui32PAUSENAddr1 = (uint32_t)&MSPIn(ui32Module)->CQPAUSE;
+    pPauseEntry->ui32PAUSEENVal1 = ui32PauseCondition;
     pPauseEntry->ui32SETCLRAddr = (uint32_t)&MSPIn(ui32Module)->CQSETCLEAR;
-    pPauseEntry->ui32SETCLRVal = pXfer->ui32StatusSetClr;
+    pPauseEntry->ui32SETCLRVal = ui32StatusSetClr;
+    pPauseEntry->ui32PAUSENAddr2 = (uint32_t)&MSPIn(ui32Module)->CQPAUSE;
+    pPauseEntry->ui32PAUSEENVal2 = AM_HAL_MSPI_PAUSE_DEFAULT;
 }
 
 static uint32_t mspi_post_cq_xfer(am_hal_mspi_state_t *pMSPIState,
@@ -3028,10 +3033,10 @@ uint32_t am_hal_mspi_cq_scatter_xfer(void *pHandle,
 {
     am_hal_mspi_state_t          *pMSPIState = (am_hal_mspi_state_t *)pHandle;
     uint32_t                      ui32Status = AM_HAL_STATUS_SUCCESS;
-    uint32_t                      ui32Module = pMSPIState->ui32Module;
     uint32_t                      ui32NumEntry;
     am_hal_cmdq_entry_t          *pCQBlock;
     uint32_t                      index;
+    uint32_t                      ui32PauseCondition = AM_HAL_MSPI_PAUSE_DEFAULT;
 
 #ifndef AM_HAL_DISABLE_API_VALIDATION
     //
@@ -3060,12 +3065,6 @@ uint32_t am_hal_mspi_cq_scatter_xfer(void *pHandle,
         return AM_HAL_STATUS_INVALID_OPERATION;
     }
 
-    if (pMSPIState->block && (pXfer->ui32PauseCondition != 0))
-    {
-        // Paused operations not allowed in block mode
-        return AM_HAL_STATUS_INVALID_OPERATION;
-    }
-
     if (!pMSPIState->seqDeviceCfg.ui16TotalPackets)
     {
         return AM_HAL_STATUS_INVALID_OPERATION;
@@ -3078,24 +3077,27 @@ uint32_t am_hal_mspi_cq_scatter_xfer(void *pHandle,
 
     if(pXfer->ui16PacketIndex == 0)
     {
+        ui32NumEntry = (sizeof(am_hal_mspi_cq_sc_pause_entry_t) +
+                        sizeof(am_hal_mspi_cq_sc_cfg_entry_t) +
+                        sizeof(am_hal_mspi_cq_sc_xfer_entry_t)) /
+                        sizeof(am_hal_cmdq_entry_t);
         switch(pMSPIState->seqDeviceCfg.eSeqMode)
         {
             case AM_HAL_MSPI_SEQ_NORM_MODE:
-                ui32NumEntry = (sizeof(am_hal_mspi_cq_sc_cfg_entry_t) +
-                                sizeof(am_hal_mspi_cq_sc_xfer_entry_t) +
-                                sizeof(am_hal_mspi_cq_sc_pause_entry_t)) /
-                                sizeof(am_hal_cmdq_entry_t) + 1;
-                break;
             case AM_HAL_MSPI_SEQ_STREAM_MODE:
-                ui32NumEntry = (sizeof(am_hal_mspi_cq_sc_cfg_entry_t) +
-                                sizeof(am_hal_mspi_cq_sc_xfer_entry_t)) /
-                                sizeof(am_hal_cmdq_entry_t) + 1;
+                ui32PauseCondition = get_pause_val(pMSPIState, 0);
                 break;
             case AM_HAL_MSPI_SEQ_LOOP_MODE:
             default:
                 //Not supported currently
                 return AM_HAL_STATUS_INVALID_ARG;
                 break;
+        }
+
+        if (pMSPIState->block && (ui32PauseCondition != AM_HAL_MSPI_PAUSE_DEFAULT))
+        {
+            // Paused operations not allowed in block mode
+            return AM_HAL_STATUS_INVALID_OPERATION;
         }
 
         //
@@ -3107,9 +3109,8 @@ uint32_t am_hal_mspi_cq_scatter_xfer(void *pHandle,
             return AM_HAL_STATUS_OUT_OF_RANGE;
         }
 
-        pCQBlock->address = (uint32_t)&MSPIn(ui32Module)->CQPAUSE;
-        pCQBlock->value = get_pause_val(pMSPIState, pXfer->ui32PauseCondition);
-        pCQBlock++;
+        build_scatter_pause(pMSPIState, ui32PauseCondition, 0, (am_hal_mspi_cq_sc_pause_entry_t *)pCQBlock);
+        pCQBlock += sizeof(am_hal_mspi_cq_sc_pause_entry_t) / sizeof(am_hal_cmdq_entry_t);
 
         build_scatter_cfg(pMSPIState, (am_hal_mspi_cq_sc_cfg_entry_t *)pCQBlock);
         pCQBlock += sizeof(am_hal_mspi_cq_sc_cfg_entry_t) / sizeof(am_hal_cmdq_entry_t);
@@ -3118,20 +3119,23 @@ uint32_t am_hal_mspi_cq_scatter_xfer(void *pHandle,
     switch(pMSPIState->seqDeviceCfg.eSeqMode)
     {
         case AM_HAL_MSPI_SEQ_NORM_MODE:
+
             if(pXfer->ui16PacketIndex > 0)
             {
                 //
                 // Check to see if there is enough room in the CQ
                 //
-                ui32NumEntry = (sizeof(am_hal_mspi_cq_sc_xfer_entry_t) +
-                                sizeof(am_hal_mspi_cq_sc_pause_entry_t)) /
+                ui32NumEntry = (sizeof(am_hal_mspi_cq_sc_pause_entry_t) +
+                                sizeof(am_hal_mspi_cq_sc_xfer_entry_t)) /
                                 sizeof(am_hal_cmdq_entry_t);
                 if ((pMSPIState->ui32NumCQEntries == AM_HAL_MSPI_MAX_CQ_ENTRIES) ||
                     (am_hal_cmdq_alloc_block(pMSPIState->CQ.pCmdQHdl, ui32NumEntry, &pCQBlock, &index)))
                 {
-                    ui32Status = AM_HAL_STATUS_OUT_OF_RANGE;
-                    break;
+                    return AM_HAL_STATUS_OUT_OF_RANGE;
                 }
+
+                build_scatter_pause(pMSPIState, ui32PauseCondition, 0, (am_hal_mspi_cq_sc_pause_entry_t *)pCQBlock);
+                pCQBlock += sizeof(am_hal_mspi_cq_sc_pause_entry_t) / sizeof(am_hal_cmdq_entry_t);
             }
 
             ui32Status = build_scatter_xfer(pMSPIState, pXfer->ui8Priority, pXfer,
@@ -3142,14 +3146,12 @@ uint32_t am_hal_mspi_cq_scatter_xfer(void *pHandle,
                 return ui32Status;
             }
 
-            pCQBlock += sizeof(am_hal_mspi_cq_sc_xfer_entry_t) / sizeof(am_hal_cmdq_entry_t);
-            build_scatter_pause(pMSPIState, pXfer, (am_hal_mspi_cq_sc_pause_entry_t *)pCQBlock);
-
             ui32Status = mspi_post_cq_xfer(pMSPIState, index, pfnCallback, pCallbackCtxt);
 
             break;
 
         case AM_HAL_MSPI_SEQ_STREAM_MODE:
+
             if (pXfer->ui16PacketIndex > 0)
             {
                 //
@@ -3157,17 +3159,11 @@ uint32_t am_hal_mspi_cq_scatter_xfer(void *pHandle,
                 //
                 ui32NumEntry = sizeof(am_hal_mspi_cq_sc_xfer_entry_t) /
                                sizeof(am_hal_cmdq_entry_t);
-                if (pXfer->ui16PacketIndex == pMSPIState->seqDeviceCfg.ui16TotalPackets - 1)
-                {
-                    ui32NumEntry += sizeof(am_hal_mspi_cq_sc_pause_entry_t) /
-                                    sizeof(am_hal_cmdq_entry_t);
-                }
 
                 if ((pMSPIState->ui32NumCQEntries == AM_HAL_MSPI_MAX_CQ_ENTRIES) ||
                     (am_hal_cmdq_alloc_block(pMSPIState->CQ.pCmdQHdl, ui32NumEntry, &pCQBlock, &index)))
                 {
-                    ui32Status = AM_HAL_STATUS_OUT_OF_RANGE;
-                    break;
+                    return AM_HAL_STATUS_OUT_OF_RANGE;
                 }
             }
 
@@ -3179,17 +3175,12 @@ uint32_t am_hal_mspi_cq_scatter_xfer(void *pHandle,
                 return ui32Status;
             }
 
-            if (pXfer->ui16PacketIndex == pMSPIState->seqDeviceCfg.ui16TotalPackets - 1)
-            {
-                pCQBlock += sizeof(am_hal_mspi_cq_sc_xfer_entry_t) / sizeof(am_hal_cmdq_entry_t);
-                build_scatter_pause(pMSPIState, pXfer, (am_hal_mspi_cq_sc_pause_entry_t *)pCQBlock);
-            }
-
             ui32Status = mspi_post_cq_xfer(pMSPIState, index, pfnCallback, pCallbackCtxt);
 
             break;
+
         default:
-            break;
+            return AM_HAL_STATUS_INVALID_ARG;
         //case AM_HAL_MSPI_SEQ_LOOP_MODE Not supported currently
     }
 
