@@ -45,6 +45,10 @@ if(CONFIG_AMBIQ_HAL_USE_SPID)
     zephyr_library_sources(hal/mcu/am_hal_ios.c)
 endif()
 
+if(CONFIG_AMBIQ_HAL_USE_I2S)
+    zephyr_library_sources(hal/am_hal_i2s.c)
+endif()
+
 if(CONFIG_AMBIQ_HAL_USE_MSPI)
     zephyr_library_sources(hal/mcu/am_hal_mspi.c)
     zephyr_library_sources(hal/mcu/am_hal_cmdq.c)
